@@ -3,6 +3,10 @@
 
 #Dataset files
 *.csv
+*.parquet
+*.pkl
+*.txt
+tokenizer/
 
 ### macOS ###
 # General
