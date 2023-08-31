@@ -87,7 +87,8 @@ class LocalAttention(nn.Module):
         attn_outputs = []
         for q_chunk, k_chunk, v_chunk in zip(q, k, v):
             attn_outputs.append(scaled_dot_product_attention(q_chunk, k_chunk, v_chunk, mask=True))
-        return self.reshape(torch.cat(attn_outputs, dim=-2))
+        attn_outputs = torch.cat(attn_outputs, dim=-2)
+        return self.reshape(self.out_proj(attn_outputs))
 
 
 class CompressedMultiHeadAttention(nn.Module):
@@ -113,4 +114,5 @@ class CompressedMultiHeadAttention(nn.Module):
         k, v = self.compress_k(k), self.compress_v(v)
         q, k, v = self.qkv_layer.reshape(q), self.qkv_layer.reshape(k), self.qkv_layer.reshape(v)
         attn_outputs = scaled_dot_product_attention(q, k, v, mask)
+        attn_outputs = self.out_proj(attn_outputs)
         return self.reshape(attn_outputs)
