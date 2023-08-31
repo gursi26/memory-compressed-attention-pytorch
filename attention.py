@@ -8,23 +8,18 @@ class QKVLayer(nn.Module):
         super(QKVLayer, self).__init__()
         assert output_dim % num_heads == 0
         self.num_heads = num_heads
-        self.q_layer = nn.Linear(input_dim, output_dim, bias=bias)
-        self.kv_layer = nn.Linear(input_dim, output_dim * 2, bias=bias)
+        self.qkv_layer = nn.Linear(input_dim, output_dim * 3, bias=bias)
 
     def reshape(self, x):
         return x.view(x.shape[0], x.shape[1], self.num_heads, -1).permute(0, 2, 1, 3)
 
-    def forward(self, x1, x2=None):
+    def forward(self, x):
         """
         x1: [batch_size, seq1_len, embed_dim]
         x2: [batch_size, seq2_len, embed_dim]
         (x2 is None if self attention)
         """
-        q = self.q_layer(x1)
-        if x2 is None:
-            k, v = self.kv_layer(x1).chunk(2, dim=-1)
-        else:
-            k, v = self.kv_layer(x2).chunk(2, dim=-1)
+        q, k, v = self.qkv_layer(x).chunk(3, dim=-1)
         return q, k, v
         
 
@@ -72,6 +67,29 @@ class CompressKV(nn.Module):
         return self.conv(x).permute(0, 2, 1)
 
 
+class LocalAttention(nn.Module):
+
+    def __init__(self, input_dim, output_dim, num_heads, block_size):
+        super(LocalAttention, self).__init__()
+        self.block_size = block_size
+        self.qkv_layer = QKVLayer(input_dim, output_dim, num_heads)
+        self.out_proj = nn.Linear(output_dim, output_dim)
+
+    def reshape(self, x):
+        x = x.permute(0, 2, 1, 3)
+        return x.reshape(x.shape[0], x.shape[1], -1)
+
+    def forward(self, x, mask):
+        q, k, v = self.qkv_layer(x)
+        q, k, v = self.qkv_layer.reshape(q), self.qkv_layer.reshape(k), self.qkv_layer.reshape(v)
+        num_chunks = (q.shape[-2] // self.block_size) + 1
+        q, k, v = q.chunk(num_chunks, dim=-2), k.chunk(num_chunks, dim=-2), v.chunk(num_chunks, dim=-2)
+        attn_outputs = []
+        for q_chunk, k_chunk, v_chunk in zip(q, k, v):
+            attn_outputs.append(scaled_dot_product_attention(q_chunk, k_chunk, v_chunk, mask=True))
+        return self.reshape(torch.cat(attn_outputs, dim=-2))
+
+
 class CompressedMultiHeadAttention(nn.Module):
 
     def __init__(self, input_dim, output_dim, num_heads, compress_factor):
@@ -85,20 +103,14 @@ class CompressedMultiHeadAttention(nn.Module):
         x = x.permute(0, 2, 1, 3)
         return x.reshape(x.shape[0], x.shape[1], -1)
 
-    def forward(self, x, mask, prev_kv=None):
+    def forward(self, x, mask):
         """
         x: [batch_size, seq_len, embed_dim]
         kv: (k, v) where k, v: [batch_size, seq_len, num_heads * per_head_dim]
         (kv is not None when attending to stored keys and values)
         """
-        if prev_kv is None:
-            q, k_, v_ = self.qkv_layer(x)
-            k, v = self.compress_k(k_), self.compress_v(v_)
-        else:
-            q, k_, v_ = self.qkv_layer(x)
-            k = self.compress_k(torch.cat([prev_kv[0], k_], dim=1))
-            v = self.compress_v(torch.cat([prev_kv[1], v_], dim=1))
-
+        q, k, v = self.qkv_layer(x)
+        k, v = self.compress_k(k), self.compress_v(v)
         q, k, v = self.qkv_layer.reshape(q), self.qkv_layer.reshape(k), self.qkv_layer.reshape(v)
         attn_outputs = scaled_dot_product_attention(q, k, v, mask)
-        return self.reshape(attn_outputs), torch.cat([k_.unsqueeze(0), v_.unsqueeze(0)], dim=0)
+        return self.reshape(attn_outputs)
